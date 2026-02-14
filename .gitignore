@@ -1,0 +1,32 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# --- Variáveis de Ambiente (CRÍTICO) ---
+.env
+.env.*
+!.env.example
+
+# --- Docker Volumes (Não queremos commitar o banco de dados) ---
+postgres_data/
+minio_data/
+redis_data/
+ollama_data/
+
+# --- IDEs ---
+.vscode/
+.idea/
+
+
+temp_*
+*.pdf
+*.log
+
+# --- Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
