@@ -1,12 +1,16 @@
-from sqlalchemy.ext.asyncio import AsyncSession #type: ignore
-from sqlalchemy import select #type: ignore
-from langchain_ollama import OllamaEmbeddings, ChatOllama #type: ignore
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder #type: ignore
-from langchain_core.output_parsers import StrOutputParser #type: ignore
-from langchain_core.messages import HumanMessage, AIMessage #type: ignore
+from sqlalchemy.ext.asyncio import AsyncSession  # type: ignore
+from sqlalchemy import select  # type: ignore
+from langchain_ollama import OllamaEmbeddings, ChatOllama  # type: ignore
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder  # type: ignore
+from langchain_core.output_parsers import StrOutputParser  # type: ignore
+from langchain_core.messages import HumanMessage, AIMessage  # type: ignore
+from langchain_classic.agents import AgentExecutor, create_react_agent
+from langchain_core.tools import tool
+from langchain_classic import hub
 
 from app.core.config import settings
 from app.models.rag_models import DocumentChunk, ChatMessage
+from app.services.tools import pesquisar_internet
 
 
 class RAGService:
@@ -48,17 +52,13 @@ class RAGService:
                 chat_history.append(AIMessage(content=msg.content))
 
         system_prompt = """
-        Você é uma API de reescrita de buscas. Sua ÚNICA função é retornar a pergunta original reformulada.
+        Você é uma API de reescrita de buscas. Sua ÚNICA função é retornar a pergunta original reformulada considerando o histórico.
         NÃO seja educado. NÃO responda à pergunta. NÃO adicione explicações. Retorne APENAS a string de busca.
         
         EXEMPLOS:
         Histórico: O que é Docker?
         Pergunta: E como eu instalo ele?
         Saída: Como instalar o Docker?
-        
-        Histórico: (vazio)
-        Pergunta: Quais as rotas do FastAPI?
-        Saída: Quais as rotas do FastAPI?
         """
 
         prompt = ChatPromptTemplate.from_messages([
@@ -76,13 +76,10 @@ class RAGService:
 
         new_question = new_question.strip().split('\n')[-1]
 
-# rets
-
         print(f"Pergunta Original: {question} | Reespectiva: {new_question}")
         return new_question
 
     async def buscar_contexto(self, pergunta_vetor: str, limite: int = 8, limiar_corte: float = 0.50):
-
         query_otimizada = f"search_query: {pergunta_vetor}"
         vetor_pergunta = self.embeddings_model.embed_query(query_otimizada)
 
@@ -110,46 +107,86 @@ class RAGService:
         return list(set(chunks_validos))
 
     async def responder(self, pergunta: str, session_id: str):
+        print(f"⚡ [Synca] Nova missão recebida: {pergunta}")
 
         historico_db = await self.get_history(session_id)
+        chat_history = []
+        for msg in historico_db:
+            if msg.role == "user":
+                chat_history.append(HumanMessage(content=msg.content))
+            else:
+                chat_history.append(AIMessage(content=msg.content))
 
-        pergunta_search = await self.contextualize_question(pergunta, historico_db)
+        ferramentas = self.obter_ferramentas()
 
-        contextos = await self.buscar_contexto(pergunta_search)
+        prompt_react = hub.pull("hwchase17/react-chat")
 
-        if not contextos:
-            return {"resposta": "Não encontrei informações nos documentos.", "fontes": []}
-
-        texto_contexto = "\n\n---\n\n".join(contextos)
-
-        template = """
-        Você é o Synca, um assistente corporativo preciso.
+        instrucoes_iniciais = """Você é o Synca, a IA oficial e Assistente Executivo.
+        Sua missão é ajudar o usuário respondendo de forma técnica, precisa e direta.
         
-        INSTRUÇÕES ESTRITAS:
-        1. Use APENAS as informações contidas no CONTEXTO abaixo para responder.
-        2. O CONTEXTO pode conter informações irrelevantes (ruído). IGNORE trechos que não tenham relação direta com a PERGUNTA.
-        3. Se a resposta não estiver no contexto, diga: "Não tenho informações suficientes nesse documento."
-        4. NÃO invente informações. NÃO use conhecimento externo.
-        5. Responda de forma direta e técnica.
+        REGRAS DE OURO:
+        1. Se a pergunta for sobre Pablo Ortiz, seus projetos, habilidades ou currículo, USE OBRIGATORIAMENTE a ferramenta 'pesquisar_documentos_internos'.
+        2. Se a pergunta for sobre notícias, cotações, ou conhecimentos gerais que você não saiba, USE A FERRAMENTA 'pesquisar_internet'.
+        
+        REGRA CRÍTICA DE SAÍDA:
+        Quando você souber a resposta final, encerre IMEDIATAMENTE usando o prefixo exato "Final Answer:". 
+        NUNCA use negrito como "**Final Answer**". NUNCA traduza para "Resposta Final". Apenas digite "Final Answer: " seguido da sua resposta em Markdown.
+        \n"""
 
-        CONTEXTO:
-        {contexto}
+        prompt_react.template = instrucoes_iniciais + prompt_react.template
 
-        PERGUNTA DO USUÁRIO: 
-        {pergunta}
-        """
-        prompt = ChatPromptTemplate.from_template(template)
-        chain = prompt | self.llm | StrOutputParser()
 
-        resposta = await chain.ainvoke({
-            "contexto": texto_contexto,
-            "pergunta": pergunta
-        })
+        agente = create_react_agent(self.llm, ferramentas, prompt_react)
+
+        agent_executor = AgentExecutor(
+            agent=agente,
+            tools=ferramentas,
+            verbose=True,
+            max_iterations=4,
+            handle_parsing_errors="Formato inválido. Apenas me dê a resposta final começando com 'Final Answer: '"
+        )
+
+        try:
+            resposta_agente = await agent_executor.ainvoke({
+                "input": pergunta,
+                "chat_history": chat_history
+            })
+
+            resposta_final = resposta_agente["output"]
+
+        except Exception as e:
+            print(f"❌ Erro crítico no motor do Agente: {str(e)}")
+            resposta_final = "Desculpe, meu processamento neural encontrou um erro ao tentar usar as ferramentas."
 
         await self.save_message(session_id, "user", pergunta)
-        await self.save_message(session_id, "assistant", resposta)
+        await self.save_message(session_id, "assistant", resposta_final)
 
         return {
-            "resposta": resposta,
-            "fontes_utilizadas": contextos
+            "resposta": resposta_final,
+            "fontes_utilizadas": ["Memória RAG", "Internet"]
         }
+
+    def obter_ferramentas(self):
+        """
+        Fábrica de Ferramentas: Une ferramentas externas (Internet) 
+        com ferramentas internas que precisam do Banco de Dados (RAG).
+        """
+
+        @tool
+        async def pesquisar_documentos_internos(query: str) -> str:
+            """
+            Use esta ferramenta OBRIGATORIAMENTE para buscar informações sobre Pablo Ortiz,
+            seu currículo, habilidades (FastAPI, React, Docker, etc), portfólio de projetos,
+            e tutoriais de tecnologia salvos no banco de dados privado.
+            """
+            print(
+                f"🧠 [AGENTE] Usando a ferramenta de RAG Interno para: {query}")
+
+            contextos = await self.buscar_contexto(query)
+
+            if not contextos:
+                return "Não encontrei informações nos documentos internos."
+
+            return "\n\n---\n\n".join(contextos)
+
+        return [pesquisar_documentos_internos, pesquisar_internet]
