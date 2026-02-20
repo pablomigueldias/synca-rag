@@ -1,8 +1,8 @@
-# 🧠 Synca RAG - Assistente Executivo Autônomo
+# Synca RAG - Assistente Executivo Autônomo
 
 Synca é um agente autônomo e assistente executivo desenvolvido com **FastAPI** e **LangChain**, projetado para rodar localmente utilizando modelos open-source via **Ollama**. O sistema combina capacidades de RAG (Retrieval-Augmented Generation) com busca na internet, permitindo que o agente recupere conhecimentos privados e informações em tempo real.
 
-## 🚀 Tecnologias Utilizadas
+## Tecnologias Utilizadas
 
 * **Backend:** Python 3.12, FastAPI, SQLAlchemy (Async)
 * **IA / LLM:** Ollama (Llama 3.1 para raciocínio, Nomic-Embed-Text para embeddings)
