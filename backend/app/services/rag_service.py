@@ -1,9 +1,9 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from langchain_ollama import OllamaEmbeddings, ChatOllama
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.messages import HumanMessage, AIMessage
+from sqlalchemy.ext.asyncio import AsyncSession #type: ignore
+from sqlalchemy import select #type: ignore
+from langchain_ollama import OllamaEmbeddings, ChatOllama #type: ignore
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder #type: ignore
+from langchain_core.output_parsers import StrOutputParser #type: ignore
+from langchain_core.messages import HumanMessage, AIMessage #type: ignore
 
 from app.core.config import settings
 from app.models.rag_models import DocumentChunk, ChatMessage
@@ -17,7 +17,7 @@ class RAGService:
             base_url=settings.OLLAMA_BASE_URL
         )
         self.llm = ChatOllama(
-            model="phi3",
+            model="llama3.1",
             base_url=settings.OLLAMA_BASE_URL,
             temperature=0.1
         )
@@ -48,14 +48,17 @@ class RAGService:
                 chat_history.append(AIMessage(content=msg.content))
 
         system_prompt = """
-        Você é uma ferramenta técnica de reescrita de consultas para banco de dados vetorial.
-        Sua ÚNICA função é reformular a pergunta do usuário para torná-la independente, baseada no histórico.
+        Você é uma API de reescrita de buscas. Sua ÚNICA função é retornar a pergunta original reformulada.
+        NÃO seja educado. NÃO responda à pergunta. NÃO adicione explicações. Retorne APENAS a string de busca.
         
-        REGRAS RIGÍDAS:
-        1. NÃO responda à pergunta.
-        2. NÃO dê dicas, receitas ou explicações.
-        3. Apenas retorne a pergunta reformulada em uma única frase.
-        4. Se a pergunta já for clara, retorne ela exatamente igual.
+        EXEMPLOS:
+        Histórico: O que é Docker?
+        Pergunta: E como eu instalo ele?
+        Saída: Como instalar o Docker?
+        
+        Histórico: (vazio)
+        Pergunta: Quais as rotas do FastAPI?
+        Saída: Quais as rotas do FastAPI?
         """
 
         prompt = ChatPromptTemplate.from_messages([
@@ -66,22 +69,25 @@ class RAGService:
 
         chain = prompt | self.llm | StrOutputParser()
 
-        new_question = chain.invoke({
+        new_question = await chain.ainvoke({
             "chat_history": chat_history,
             "question": question
         })
+
         new_question = new_question.strip().split('\n')[-1]
 
-#rets
+# rets
 
         print(f"Pergunta Original: {question} | Reespectiva: {new_question}")
         return new_question
 
-    async def buscar_contexto(self, pergunta_vetor: str, limite: int = 8, limiar_corte: float = 0.88):
+    async def buscar_contexto(self, pergunta_vetor: str, limite: int = 8, limiar_corte: float = 0.50):
 
-        vetor_pergunta = self.embeddings_model.embed_query(pergunta_vetor)
+        query_otimizada = f"search_query: {pergunta_vetor}"
+        vetor_pergunta = self.embeddings_model.embed_query(query_otimizada)
 
-        distancia = DocumentChunk.embedding.l2_distance(vetor_pergunta)
+        distancia = DocumentChunk.embedding.cosine_distance(vetor_pergunta)
+
         stmt = select(DocumentChunk, distancia).order_by(
             distancia).limit(limite)
 
@@ -95,11 +101,11 @@ class RAGService:
 
             if score < limiar_corte:
                 print(
-                    f"✅ Match aceito: {score:.4f} | Texto: {chunk.content[:50]}...")
+                    f"✅ Match (Cosseno): {score:.4f} | Texto: {chunk.content[:50]}...")
                 chunks_validos.append(chunk.content)
             else:
                 print(
-                    f"Lixo descartado (muito longe): {score:.4f} | Texto: {chunk.content[:50]}...")
+                    f"🗑️ Descartado (Cosseno): {score:.4f} | Texto: {chunk.content[:50]}...")
 
         return list(set(chunks_validos))
 
@@ -135,7 +141,7 @@ class RAGService:
         prompt = ChatPromptTemplate.from_template(template)
         chain = prompt | self.llm | StrOutputParser()
 
-        resposta = chain.invoke({
+        resposta = await chain.ainvoke({
             "contexto": texto_contexto,
             "pergunta": pergunta
         })
